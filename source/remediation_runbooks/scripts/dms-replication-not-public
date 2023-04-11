@@ -1,0 +1,79 @@
+import boto3
+import json
+
+def lambda_handler(event, context):
+    dms_client = boto3.client('dms')
+    dms_replication_instances = dms_client.describe_replication_instances()
+    
+    for instance in dms_replication_instances['ReplicationInstances']:
+        instance_id = instance['ReplicationInstanceIdentifier']
+        publicly_accessible = instance['PubliclyAccessible']
+        
+        if publicly_accessible:
+            print(f"Instance {instance_id} is publicly accessible.")
+            
+            try:
+                new_instance_id = f"{instance_id}-private"
+                
+                vpc_security_group_ids = [sg['VpcSecurityGroupId'] for sg in instance['VpcSecurityGroups']]
+                
+                # Try to list replication tasks associated with the old instance
+                try:
+                    replication_tasks = dms_client.describe_replication_tasks(
+                        Filters=[{
+                            'Name': 'replication-instance-arn',
+                            'Values': [instance['ReplicationInstanceArn']]
+                        }]
+                    )
+                except dms_client.exceptions.ResourceNotFoundFault:
+                    replication_tasks = {'ReplicationTasks': []}
+                    print(f"No replication tasks found for instance {instance_id}. Skipping replication task updates.")
+                
+                # Delete the current instance
+                response = dms_client.delete_replication_instance(
+                    ReplicationInstanceArn=instance['ReplicationInstanceArn']
+                )
+                print(f"Successfully deleted the old instance {instance_id}.")
+                
+                # Create a new instance with the same configuration, but with PubliclyAccessible=False
+                response = dms_client.create_replication_instance(
+                    ReplicationInstanceIdentifier=new_instance_id,
+                    ReplicationInstanceClass=instance['ReplicationInstanceClass'],
+                    AllocatedStorage=instance['AllocatedStorage'],
+                    VpcSecurityGroupIds=vpc_security_group_ids,
+                    AvailabilityZone=instance['AvailabilityZone'],
+                    PreferredMaintenanceWindow=instance['PreferredMaintenanceWindow'],
+                    MultiAZ=instance['MultiAZ'],
+                    EngineVersion=instance['EngineVersion'],
+                    AutoMinorVersionUpgrade=instance['AutoMinorVersionUpgrade'],
+                    PubliclyAccessible=False,
+                    KmsKeyId=instance['KmsKeyId'],
+                    Tags=instance.get('Tags', [])  # Use .get() to handle cases where the 'Tags' field is not present
+                )
+                new_instance_arn = response['ReplicationInstance']['ReplicationInstanceArn']
+                print(f"Successfully created new instance {new_instance_id} with PubliclyAccessible=False.")
+                
+                # Update replication tasks to use the new replication instance if any
+                for task in replication_tasks['ReplicationTasks']:
+                    task_arn = task['ReplicationTaskArn']
+                    response = dms_client.modify_replication_task(
+                        ReplicationTaskArn=task_arn,
+                        ReplicationInstanceArn=new_instance_arn,
+                        ApplyImmediately=True
+                    )
+                    print(f"Successfully updated replication task {task['ReplicationTaskIdentifier']} to use the new replication instance {new_instance_id}.")
+            except Exception as e:
+                print(f"An error occurred during the process: {str(e)}")
+                print("Check the following steps to determine the cause:")
+                print("1. Deleting the old instance.")
+                print("2. Creating a new instance.")
+                print("3. Reconfiguring replication tasks.")
+        else:
+            print(f"Instance {instance_id} is not publicly accessible.")
+    
+    print("DMS Replication Instances processed.")
+    
+    return {
+        'statusCode': 200,
+        'body': json.dumps('DMS Replication Instances processed.')
+    }
